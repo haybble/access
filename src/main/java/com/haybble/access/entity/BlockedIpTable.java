@@ -1,10 +1,8 @@
 package com.haybble.access.entity;
 
-import lombok.Getter;
-
 import javax.persistence.*;
 
-@Getter
+
 
 @Entity(name = "BLOCKED_IP_TABLE")
 @Table(name = "BLOCKED_IP_TABLE")

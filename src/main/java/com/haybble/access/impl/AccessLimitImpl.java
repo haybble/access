@@ -4,39 +4,55 @@ import com.haybble.access.entity.BlockedIpTable;
 import com.haybble.access.entity.UserAccessLog;
 import com.haybble.access.repository.BlockedIpRepository;
 import com.haybble.access.repository.UserAccessLogRepository;
+import com.haybble.access.service.AccessLimitService;
+import com.haybble.access.utils.AccessLimitUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Service;
+
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Scanner;
 
-@Configuration
-public class AccessImpl {
+@Component
+@Service
+public  class AccessLimitImpl implements AccessLimitService {
 
-    public static final String datePattern = "yyyy-MM-dd HH:mm:ss";
+    public static final String ACCESS_FILE = "accessFile";
+    public static final String START = "start";
+    public static final String DURATION = "duration";
+    public static final String LIMIT = "limit";
 
-    private static UserAccessLogRepository userAccessLogRepository;
 
-    private static BlockedIpRepository blockedIpRepository;
+    private AccessLimitUtils accessLimitUtils = new AccessLimitUtils();
 
-    private static Logger logger = LoggerFactory.getLogger(AccessImpl.class);
+    public UserAccessLogRepository userAccessLogRepository ;
 
-    public AccessImpl(UserAccessLogRepository userAccessLogRepository, BlockedIpRepository blockedIpRepository) {
+    public  BlockedIpRepository blockedIpRepository;
+
+    private Logger logger = LoggerFactory.getLogger(AccessLimitImpl.class);
+
+    @Autowired
+    public AccessLimitImpl(UserAccessLogRepository userAccessLogRepository, BlockedIpRepository blockedIpRepository) {
         this.userAccessLogRepository = userAccessLogRepository;
         this.blockedIpRepository = blockedIpRepository;
     }
 
-    public static boolean loadUserAccessLogToDb(Path filePath) {
+    @Override
+    public boolean loadFileToDb(Path filePath) {
         try {
             File file = new File(String.valueOf(filePath));
             Scanner myReader = getFileContents(file);
             myReader.close();
-            return true;
+            return  true;
         } catch (FileNotFoundException e) {
             System.out.println("An error occurred.");
             e.printStackTrace();
@@ -44,8 +60,26 @@ public class AccessImpl {
         }
     }
 
-    private static Scanner getFileContents(File file) throws FileNotFoundException {
+    @Override
+    public  HashMap<String, String> extractArguments(String[] args) {
+        HashMap<String,String> params = new HashMap<>();
+        if ((args != null) && (args.length == 4)) {
+            for (String arg : args) {
+                String[] splitFromEqual = arg.split("=");
+                String key = splitFromEqual[0].substring(2);
+                String value = splitFromEqual[1];
+                params.put(key, value);
+            }
+        } else {
+            logger.debug("Incomplete arguments passed.");
+        }
+        return params;
+
+    }
+
+    private Scanner getFileContents(File file) throws FileNotFoundException {
         Scanner myReader = new Scanner(file);
+        List<UserAccessLog> extactedUserLogs = new ArrayList<>();
         while (myReader.hasNextLine()) {
             String data = myReader.nextLine();
             String sp = data.replace("|", ",");
@@ -56,14 +90,22 @@ public class AccessImpl {
             String status = splited[3];
             String userAgent = splited[4];
             UserAccessLog userAccessLog = setUserAccessLogObject(date, ip, request, status, userAgent);
-            userAccessLogRepository.save(userAccessLog);
+            if(userAccessLog!=null){
+                extactedUserLogs.add(userAccessLog);
+            }
+            else{
+                throw new FileNotFoundException("could not read out access log from file");
+            }
+        }
+        if(!extactedUserLogs.isEmpty()){
+            userAccessLogRepository.saveAll(extactedUserLogs);
         }
         return myReader;
     }
 
-    private static UserAccessLog setUserAccessLogObject(String date, String ip, String request, String status, String userAgent) {
+    public UserAccessLog setUserAccessLogObject(String date, String ip, String request, String status, String userAgent) {
         UserAccessLog userAccessLog = new UserAccessLog();
-        LocalDateTime localDateTime = LocalDateTime.parse((date), DateTimeFormatter.ofPattern(datePattern));
+        LocalDateTime localDateTime = LocalDateTime.parse((date), DateTimeFormatter.ofPattern(accessLimitUtils.datePattern));
         userAccessLog.setDate(localDateTime);
         userAccessLog.setIp(ip);
         userAccessLog.setRequest(request);
@@ -72,17 +114,18 @@ public class AccessImpl {
         return userAccessLog;
     }
 
-    public static List<String> checkExceededLimit(String start, int limit, String duration) {
-        String startDate = formatStartDateTime(start);
-        LocalDateTime startDateTime = LocalDateTime.parse(startDate, DateTimeFormatter.ofPattern(datePattern));
-        LocalDateTime endDateTime = getEndDateTime(startDate, duration);
-        int durationAllocated = getDurationInHours(duration);
+    @Override
+    public List<String> checkExceededLimitFromDb(String start, int limit, String duration) {
+        String startDate = accessLimitUtils.formatStartDateTime(start);
+        LocalDateTime startDateTime = LocalDateTime.parse(startDate, DateTimeFormatter.ofPattern(accessLimitUtils.datePattern));
+        LocalDateTime endDateTime = accessLimitUtils.getEndDateTime(startDate, duration);
+        int durationAllocated = accessLimitUtils.getDurationInHours(duration);
         List<String> requestsPerDurationGreatThanLimit = userAccessLogRepository.findAllByUserAccesslogIpbetweenStartDateAndEndDate(startDateTime, endDateTime, limit);
         saveBlockedIps(limit, durationAllocated, startDateTime, endDateTime, requestsPerDurationGreatThanLimit);
         return requestsPerDurationGreatThanLimit;
     }
 
-    private static void saveBlockedIps(int limit, int durationAllocated, LocalDateTime startDateTime, LocalDateTime endDateTime, List<String> requestsPerDurationGreatThanLimit) {
+    private void saveBlockedIps(int limit, int durationAllocated, LocalDateTime startDateTime, LocalDateTime endDateTime, List<String> requestsPerDurationGreatThanLimit) {
         requestsPerDurationGreatThanLimit.stream().forEach(ip -> {
             int count = 0;
             BlockedIpTable blockedIpTable = new BlockedIpTable();
@@ -95,19 +138,5 @@ public class AccessImpl {
             blockedIpRepository.save(blockedIpTable);
         });
     }
-
-    public static LocalDateTime getEndDateTime(String startDate, String duration) {
-        return LocalDateTime.parse(startDate, DateTimeFormatter.ofPattern(datePattern)).plusHours(getDurationInHours(duration));
-
-    }
-
-    public static int getDurationInHours(String duration) {
-        return (duration == "hourly") ? 1 : 24;
-    }
-
-    public static String formatStartDateTime(String startDate) {
-        return startDate.replace(".", " ");
-    }
-
 
 }
